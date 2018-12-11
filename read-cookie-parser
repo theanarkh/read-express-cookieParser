@@ -1,6 +1,6 @@
 首先，我们看一下cookie怎么使用。
 
-```
+```javascript
 var express = require('express')
 
 var cookieParser = require('cookie-parser')
