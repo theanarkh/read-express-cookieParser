@@ -1,0 +1,173 @@
+首先，我们看一下cookie怎么使用。
+
+```
+var express = require('express')
+
+var cookieParser = require('cookie-parser')
+
+var signature = require('cookie-signature');
+
+var app = express();
+
+var secret = 'zym'; // 用于加密解密
+
+// 使用签名cookie
+
+app.use(cookieParser(secret));
+
+app.get('/', function(req, res) {
+
+console.log('Cookies: ', req.cookies);
+
+console.log('signedCookies: ', req.signedCookies);
+
+res.cookie('hello', 'world' ); // 设置常规cookie，http头表示set-cookie：hello=world
+
+// res.cookie('hello', 'world' , {signed: true}); 签名cookie,http头表示set-cookie：hello=s%3Aworldxxxxx加密字符串
+
+//res.cookie('hello', {name: 'world'} );// 常规cookie的json化,http头表示set-cookie：hello=j%3AJSON.stringify({name: 'world'})
+
+//res.cookie('hello', {name: 'world'} , {signed: true});// 签名cookie的json化,http头表示set-cookie：hello=s%3Aj%3AJSON.stringify({name: 'world'})xxxxx加密字符串
+
+res.end('......');
+
+});
+
+app.listen(8080);
+```
+
+我们从起点说起，首先，有写才能有读，我们通过res.cookie函数设置cookie，express里，cookie可以分为两种，常规的和签名的，而这两种都支持json化。常规的cookie的序列化和反序列化都是比较简单的，json也不需要讲，主要是讲一下签名cookie的过程。我们看一下express中写cookie的实现(在response.js)：
+
+```
+var val = typeof value === 'object'
+
+? 'j:' + JSON.stringify(value)
+
+: String(value);
+
+
+
+if (signed) {
+
+val = 's:' + sign(val, secret);
+
+}
+```
+
+sign的代码:
+```
+val + '.' + crypto
+
+.createHmac('sha256', secret)
+
+.update(val)
+
+.digest('base64')
+
+.replace(/\=+$/, '');
+```
+
+写cookie到这算是说完了。
+
+下面开始说一下读cookie的过程。
+
+应用程序从nodejs拿到的cookie是原生的，nodejs从http协议解析出cookie头的键和值，并没有对值进行解析。所以我们需要自己解析。express中使用cookieParser来解析，cookieParser的大致流程就是，
+
+1 解析常规的cookie，存到req.cookie字段
+
+2 判断是否要解析签名cookie，存到req.signedCookies字段
+
+3 对上面的两个字段里的值反序列化处理
+
+
+
+源码如下：
+```
+
+exports = module.exports = function cookieParser(secret, options){
+
+return function cookieParser(req, res, next) {
+
+// 已经解析过直接返回
+
+if (req.cookies) return next();
+
+// 获取nodejs层面的cookie值，形如"name1=value; name2=value2"
+
+var cookies = req.headers.cookie;
+
+// 保存用于加密的字符串到req，加密解密的的时候需要用到
+
+req.secret = secret;
+
+req.cookies = Object.create(null);
+
+req.signedCookies = Object.create(null);
+
+// nodejs层面没有cookie字段直接返回
+
+if (!cookies) {
+
+return next();
+
+}
+
+// 解析"name1=value; name2=value2"，变成{name1: value1, name2: value2}
+
+req.cookies = cookie.parse(cookies, options);
+
+// 传了加密字符串则说明使用了签名cookie，这里解析签名的cookie
+
+if (secret) {
+
+// 解析签名cookie，见下面分析
+
+req.signedCookies = parse.signedCookies(req.cookies, secret);
+
+// 见下面一行
+
+req.signedCookies = parse.JSONCookies(req.signedCookies);
+
+}
+
+// 这里放到这里是因为，如果有签名cookie的话，签名的cookie字段会从req.cookie对象里被删除，一般cookie和签名cookie是分来存储的，cookie的值只能是字符串，所以如果我们的值是对象那就需要序列化后再存储，jsonCookie就是解析值为序列化的字符串的情况，如果值是json化过的，前面会加上j:前缀，遇到这种值的时候就会调用JSON.parse解析出一个对象。
+
+req.cookies = parse.JSONCookies(req.cookies);
+
+next();
+
+};
+
+};
+
+```
+
+下面我们具体以上三步的具体实现。
+
+1 常规cookie的解析，具体的源码就不贴了，随便找一个cookie的库就可以。
+
+2 签名cookie的解析。
+
+对应cookie值里以s:开头的就会进行解密处理，核心代码如下：
+```
+return str.substr(0, 2) === 's:' ? signature.unsign(str.slice(2), secret) : str;
+```
+unsign和相关函数
+```
+exports.unsign = function(val, secret){
+
+var str = val.slice(0, val.lastIndexOf('.')), mac = exports.sign(str, secret);
+
+return sha1(mac) == sha1(val) ? str : false;
+
+};
+
+function sha1(str){
+
+return crypto.createHash('sha1').update(str).digest('hex');
+
+}
+```
+加密后的cookie中会存着加密前字符串的值，所以先从加密的值中获取原始值，再加密一次，然后对比一下看值是否被篡改过。
+
+读cookie也写完了。
